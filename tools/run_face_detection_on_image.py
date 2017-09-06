@@ -11,6 +11,10 @@ import caffe, os, sys, cv2
 import argparse
 import sys
 
+# Dockerface network
+NETS = {'vgg16': ('VGG16',
+          'output/faster_rcnn_end2end/wider/vgg16_dockerface_iter_80000.caffemodel')}
+
 def parse_args():
   """Parse input arguments."""
   parser = argparse.ArgumentParser(description='Face Detection using Faster R-CNN')
@@ -21,6 +25,9 @@ def parse_args():
             action='store_true')
   parser.add_argument('--net', dest='demo_net', help='Network to use [vgg16]',
             choices=NETS.keys(), default='vgg16')
+  parser.add_argument('--image', dest='image_path', help='Path of image')
+  parser.add_argument('--output_string', dest='output_string', help='String appended to output file')
+  parser.add_argument('--conf_thresh', dest='conf_thresh', help='Confidence threshold for the detections, float from 0 to 1', default=0.85, type=float)
 
   args = parser.parse_args()
 
@@ -54,80 +61,54 @@ if __name__ == '__main__':
 
   print '\n\nLoaded network {:s}'.format(caffemodel)
 
-  data_dir = 'data/FDDB/'
-  out_dir = 'output/fddb_res'
+  # LOAD DATA FROM IMAGE
+  out_dir = 'output/images/'
 
   if not os.path.exists(out_dir):
     os.makedirs(out_dir)
 
-  CONF_THRESH = 0.65
+  dets_file_name = os.path.join(out_dir, 'image-output-%s.txt' % args.output_string)
+  fid = open(dets_file_name, 'w')
+
+  CONF_THRESH = args.conf_thresh
   NMS_THRESH = 0.15
 
-  imdb = get_imdb_fddb(data_dir)
+  print args.image_path
+  if not os.path.exists(args.image_path):
+    print 'Image does not exist.'
 
-  # Warmup on a dummy image
-  im = 128 * np.ones((300, 500, 3), dtype=np.uint8)
-  for i in xrange(2):
-    _, _= im_detect(net, im)
+  img = cv2.imread(args.image_path)
 
-  nfold = len(imdb)
-  for i in xrange(nfold):
-    image_names = imdb[i]
+  # img is BGR cv2 image.
+  # # Detect all object classes and regress object bounds
+  scores, boxes = im_detect(net, img)
 
-    # detection file
-    dets_file_name = os.path.join(out_dir, 'FDDB-det-fold-%02d.txt' % (i + 1))
-    fid = open(dets_file_name, 'w')
-    sys.stdout.write('%s ' % (i + 1))
+  cls_ind = 1
+  cls_boxes = boxes[:, 4*cls_ind:4*(cls_ind + 1)]
+  cls_scores = scores[:, cls_ind]
+  dets = np.hstack((cls_boxes,
+            cls_scores[:, np.newaxis])).astype(np.float32)
+  keep = nms(dets, NMS_THRESH)
+  dets = dets[keep, :]
 
-    for idx, im_name in enumerate(image_names):
-      # timer = Timer()
-      # timer.tic()
+  keep = np.where(dets[:, 4] > CONF_THRESH)
+  dets = dets[keep]
 
-      # Load the demo image
-      mat_name = im_name + '.mat'
+  # dets are the upper left and lower right coordinates of bbox
+  # dets[:, 0] = x_ul, dets[:, 1] = y_ul
+  # dets[:, 2] = x_lr, dets[:, 3] = y_lr
 
-      # im_path = im_name + '.jpg'
-      im = cv2.imread(os.path.join(data_dir, 'originalPics', im_name + '.jpg'))
-
-      # # Detect all object classes and regress object bounds
-      # timer = Timer()
-      # timer.tic()
-      scores, boxes = im_detect(net, im)
-      # timer.toc()
-      # print ('Detection took {:.3f}s for '
-      #        '{:d} object proposals').format(timer.total_time, boxes.shape[0])
-
-      cls_ind = 1
-      cls_boxes = boxes[:, 4*cls_ind:4*(cls_ind + 1)]
-      cls_scores = scores[:, cls_ind]
-      dets = np.hstack((cls_boxes,
-                cls_scores[:, np.newaxis])).astype(np.float32)
-      keep = nms(dets, NMS_THRESH)
-      dets = dets[keep, :]
-
-      keep = np.where(dets[:, 4] > CONF_THRESH)
-      dets = dets[keep]
-
-      # vis_detections(im, 'face', dets, CONF_THRESH)
-
-      dets[:, 2] = dets[:, 2] - dets[:, 0] + 1
-      dets[:, 3] = dets[:, 3] - dets[:, 1] + 1
-
-      # timer.toc()
-      # print ('Detection took {:.3f}s for '
-      #        '{:d} object proposals').format(timer.total_time, boxes.shape[0])
-
-      fid.write(im_name + '\n')
-      fid.write(str(dets.shape[0]) + '\n')
+  dets[:, 2] = dets[:, 2]
+  dets[:, 3] = dets[:, 3]
+  if (dets.shape[0] != 0):
       for j in xrange(dets.shape[0]):
-        fid.write('%f %f %f %f %f\n' % (dets[j, 0], dets[j, 1], dets[j, 2], dets[j, 3], dets[j, 4]))
+        # Write file_name bbox_coords
+        fid.write(args.image_path.split('/')[-1] + ' %f %f %f %f %f\n' % (dets[j, 0], dets[j, 1], dets[j, 2], dets[j, 3], dets[j, 4]))
+        # Draw bbox
+        cv2.rectangle(img,(int(dets[j, 0]), int(dets[j, 1])),(int(dets[j, 2]), int(dets[j, 3])),(0,255,0),3)
 
+  cv2.imwrite('output/images/output-%s.png' % args.output_string, img)
+  print 'Detected faces in image: ' + args.image_path
+  print 'Done with detection.'
 
-      if ((idx + 1) % 10) == 0:
-        sys.stdout.write('%.3f ' % ((idx + 1) / len(image_names) * 100))
-        sys.stdout.flush()
-
-    print ''
-    fid.close()
-
-  # os.system('cp ./fddb_res/*.txt ~/Code/FDDB/results')
+  fid.close()
